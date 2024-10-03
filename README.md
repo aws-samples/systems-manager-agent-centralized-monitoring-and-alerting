@@ -6,7 +6,7 @@ This post demonstrates how to monitor the status of the AWS Systems Manager Agen
 
 ## Workflow
 
-![Alt text](images/centralized-ssm-monitoring.png)
+![Alt text](./images/centralized-ssm-monitoring.png)
 
 The solution uses an AWS Lambda function to check the health of the SSM agent connection on your critical managed nodes across your AWS Organization (or specific AWS Accounts), using the specific tags and regions you define, and report their `PingStatus` metric to a centralized Amazon Cloudwatch dashboard. Whenever your managed nodes have an healthy connection to Systems Manager, the `PingStatus` attribute of the node from the `DescribeInstanceInformation` API reports `Online`. The Lambda function creates a `PingStatus` metric in Amazon Cloudwatch, such that when the PingStatus is `Online`, the metric is value `0`, otherwise it is `1`. The Lambda Function also creates Amazon Cloudwatch Alarms for the critical managed nodes and configures alerts to send messages to your defined SNS topic when activated. This Lambda function is periodically invoked by an Amazon EventBridge custom rule. You can define how frequent you want the Lambda Function to be invoked by defining your frequency in the Amazon EventBridge rule.
 
