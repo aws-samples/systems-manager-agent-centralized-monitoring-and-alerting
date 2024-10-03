@@ -224,7 +224,6 @@ Resources:
 
           def get_accounts(org):
             try:
-                #org_client = boto3.client('organizations')
                 response = org.list_accounts()
                 results = response["Accounts"]
                 while "NextToken" in response:
@@ -281,7 +280,6 @@ Resources:
                                 ],)
                             ec2_instances.extend(ec2_response)
                         ec2_instances_status = {instance['Instances'][0]["InstanceId"] : instance['Instances'][0]['State']['Name'] for instance in ec2_instances['Reservations']}
-                        #ec2_instances = list(ec2_instances_status.keys())
                     except ClientError as error:
                         raise error
                     # get the SSM agent ping status of all instances that are registered in Systems Manager filter using tags
