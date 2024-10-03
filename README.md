@@ -23,6 +23,7 @@ Watch Dashboard.
 ## Deployment
 
 **Prerequisites**
+
 For this walkthrough, you should have the following: 
 
 1. An  AWS Account or list of AWS Accounts or AWS Organization.
@@ -31,6 +32,7 @@ For this walkthrough, you should have the following:
 4. An Amazon SNS Topic with subscribers in central dashboard region. The subscribers can be emails, SMS etc.  
 
 **Walkthrough**
+
 There are two CloudFormation templates you will deploy for this solution:
 
 1.	Create an IAM role using [CloudFormation template](SSMAgent_IAM_Role.yml) in all your accounts in AWS Organization or specific AWS accounts. These IAM roles will be assumed by the SSMPingStatus Lambda Function to be created in next step. 
