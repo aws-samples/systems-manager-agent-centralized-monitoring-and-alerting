@@ -1,0 +1,39 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS CloudFormation template for monitoring of  AWS Systems Manager Agent (SSM Agent) status on critical managed nodes across AWS Organizations. This template creates the cross account Identity Access Management (IAM) role for Lambda execution.
+Parameters:
+  CentralAccount:
+    Type: String
+    Description: Central AWS Account ID where the SSM Agent Monitoring Dashboard would be created.
+  AWSSSMPingStatusCrossAccountRoleName:
+    Type: String
+    Description: Cross account IAM role which will be assumed by AWS Lambda to check resources in child accounts/AWS Organizations.
+    Default: AWS-Lambda-SSMPingStatus-Cross-Account-Role
+Resources:
+  AWSSSMPingStatusCrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref AWSSSMPingStatusCrossAccountRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:${AWS::Partition}:iam::${CentralAccount}:root
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: DescribeEC2Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                - ec2:DescribeInstances
+                - ssm:DescribeInstanceInformation
+                Resource: "*"
+                Effect: Allow
+Outputs:
+  AWSSSMPingStatusCrossAccountRoleName:
+    Description: Cross account IAM role to be assumed by Ping Status AWS Lambda Function.
+    Value: !Ref AWSSSMPingStatusCrossAccountRoleName

@@ -1,0 +1,493 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS CloudFormation template for monitoring of AWS Systems Manager Agent (SSM Agent) status
+  on critical managed nodes across AWS Organizations using AWS Lambda Function, Amazon
+  EventBridge and Amazon CloudWatch. **WARNING** This template creates AWS Lambda Function, Amazon EventBridge rule and related resources. You will be billed for the AWS resources used if you create a stack from this template.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Input Parameters
+        Parameters:
+          - Target
+          - TargetAccounts
+          - TargetRegionIds
+          - Tag
+          - EventBridgeSchedule
+          - CrossAccountExecutionRoleName
+          - CloudwatchCentralDashboardRegion
+          - SNSTopicArn
+          - CreateCloudWatchAlarm
+Parameters:
+  Target:
+    Type: String
+    Description: Target entire AWS Organizations or specific AWS account(s).
+    Default: AWS Organization
+    AllowedValues:
+      - AWS Organization
+      - Accounts
+  TargetAccounts:
+    Type: String
+    Description: The specific accounts to target if not targetting entire AWS Organizations.
+  TargetRegionIds:
+    Type: String
+    Description: The target region(s). Specify more than one region separated by comma.
+    Default: us-east-1
+  Tag:
+    Type: String
+    Description:
+      The Tag to filter for the critical managed node to be included for
+      monitoring e.g. "key:value"
+    Default: SSMMonitoring:true
+  EventBridgeSchedule:
+    Type: String
+    Description:
+      The frequency for Amazon EventBridge to invoke the AWS Lambda function in cron
+      format. The time zone used is UTC. For more information, see
+      https://docs.aws.amazon.com/eventbridge/latest/userguide/scheduled-events.html.
+    Default: cron(0/30 * * * ? *)
+  CrossAccountExecutionRoleName:
+    Type: String
+    Description:
+      Supply your cross account IAM role which will be assumed by AWS Lambda
+      to check resources in child accounts/AWS Organizations. This role name must
+      exist in every account where the managed nodes will be monitored.
+    Default: AWS-Lambda-SSMPingStatus-Cross-Account-Role
+  CloudwatchCentralDashboardRegion:
+    Type: String
+    Description:
+      The region where you want the custom Amazon CloudWatch dashboard to
+      be created.
+    Default: us-east-1
+  SNSTopicArn:
+    Type: String
+    Description: The Amazon SNS topic arn to be configured as target of the Amazon
+      CloudWatch alarm. The SNS topic arn must be in the same region where the
+      Amazon CloudWatch Dashboard is created.
+  CreateCloudWatchAlarm:
+    Type: String
+    Description:
+      Create the CloudWatch Alarm to send alerts to Amazon SNS topic if the managed node (Amazon EC2 or Hybrid instance) is no longer managed by AWS Systems Manager.
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+  RetainCloudWatchResourcesOnDelete:
+    Type: String
+    Description:
+      For a Delete operation on this CloudFormation Stack, select "true" if you want to retain the Amazon CloudWatch Dashboard and CloudWatch Alarm(s) created by this solution stack. Otherwise, select "false" to delete.
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+Resources:
+  EventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description:
+        Amazon EventBridge rule created for monitoring of SSM Agent status on critical managed nodes across AWS Organizations using Lambda Function, EventBridge and Amazon CloudWatch.
+      Name: Schedule-Trigger-for-Lambda-SSM-PingStatus
+      ScheduleExpression: !Ref EventBridgeSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SSMPingStatusLambdaFunction.Arn
+          Id: SSMPingStatus
+
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SSMPingStatusLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventBridgeRule.Arn
+
+  AWSLambdaSSMPingStatusRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: AWSLambdaSSMMPingStatusPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action: sts:AssumeRole
+                Resource: !Sub arn:${AWS::Partition}:iam::*:role/${CrossAccountExecutionRoleName}
+                Effect: Allow
+              - Action: organizations:ListAccounts
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                - cloudwatch:PutMetricAlarm
+                - cloudwatch:PutDashboard
+                - cloudwatch:DeleteAlarms
+                - cloudwatch:DeleteDashboards
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/AWSOrganization-SSMAgentPingStatus
+                  - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*
+                Effect: Allow
+              - Action:
+                - cloudwatch:PutMetricData
+                - cloudwatch:DescribeAlarms
+                Resource: "*"
+                Effect: Allow
+              - Action: logs:CreateLogGroup
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+                Effect: Allow
+              - Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LambdaFunctionLogGroup.Arn
+                Effect: Allow
+  LambdaFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+  SSMPingStatusLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import cfnresponse
+          from botocore.errorfactory import ClientError
+          import logging
+          import json
+
+          # initialize the cloudwatch and org clients
+          cw_central_dashboard = os.environ['CloudwatchCentralDashboardRegion']
+          cw = boto3.client('cloudwatch', region_name=cw_central_dashboard)
+          org = boto3.client('organizations')
+          sts_client = boto3.client('sts')
+          region_mapper = {}
+
+          logger = logging.getLogger()
+
+          def lambda_handler(event,context):
+            # delete the CW Dashboard if the event type is delete
+            retain_cloudwatch_resources = os.environ["RetainCloudWatchResourcesOnDelete"]
+            alarms = os.environ['CreateCloudWatchAlarm']
+            responseData = {}
+            if 'RequestType' in event:
+              if event['RequestType'] == 'Delete':
+                if retain_cloudwatch_resources == 'false':
+                  try:
+                    cw.delete_dashboards(DashboardNames=['AWSOrganization-SSMAgentPingStatus'])
+                    if alarms == 'true':
+                      response = cw.describe_alarms(AlarmNamePrefix='SSMAgent_PingStatus-')['MetricAlarms']
+                      alarms = [alarm['AlarmName'] for alarm in response]
+                      for alarm_name in alarms:
+                        cw.delete_alarms(AlarmNames=[alarm_name,])
+                    responseData['Message'] = "Resource deletion successful!"
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                  except ClientError as error:
+                    responseData['Message'] = f"Resource deletion failed! {error}"
+                    cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+              else:
+                invoke(context)
+                responseData['Message'] = "Resource creation successful!"
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+            else:
+              invoke(context)
+            return
+
+          def invoke(context):
+            target = os.environ['Target']
+            regions = os.environ['TargetRegionIds']
+            tags = os.environ['Tag']
+            cross_account_role_name = os.environ['CrossAccountExecutionRoleName']
+            sns_topic_arn = os.environ['SNSTopicArn']
+            accounts_list = os.environ['TargetAccounts']
+            alarms = os.environ['CreateCloudWatchAlarm']
+            status = {}
+            # run the automation
+            if target == "AWS Organization":
+                accounts = get_accounts(org)
+            else:
+                accounts = [account.strip() for account in accounts_list.strip().split(",")]
+            # Check and convert region list
+            regions = [region.strip() for region in regions.strip().split(",")]
+            get_ping_status(regions, tags, status, accounts, cross_account_role_name,context)
+            publish_cloudwatch_metric(status, cw)
+            if alarms == "true":
+                create_alarm(sns_topic_arn,status,cw)
+            create_custom_dashboard(status,cw,cw_central_dashboard)
+            return str(status)
+
+          def get_accounts(org):
+            try:
+                #org_client = boto3.client('organizations')
+                response = org.list_accounts()
+                results = response["Accounts"]
+                while "NextToken" in response:
+                    response = org.list_accounts(NextToken=response["NextToken"])
+                    results.extend(response["Accounts"])
+                results = [result['Id'] for result in results]
+                return results
+            except ClientError as error:
+                raise error
+
+          def get_ping_status(regions, tags, status, accounts, cross_account_role_name,context):
+            tags_split = tags.strip().split(":")
+            if len(tags_split) == 2:
+                tags_key,tags_value = tags_split
+            else:
+                raise Exception("Tags not in format key:value")
+            tags_key = 'tag:'+tags_key
+            tags_value = [tags_value]
+            aws_lambda_region = context.invoked_function_arn.split(":")[3]
+            aws_lambda_partition = boto3.session.Session().get_partition_for_region(aws_lambda_region)
+            for account in accounts:
+                assumedRoleObject = sts_client.assume_role(
+                    RoleArn=f"arn:{aws_lambda_partition}:iam::{account}:role/{cross_account_role_name}",
+                    RoleSessionName="PingStatusAssumeRole-Lambda"
+                )
+                credentials = assumedRoleObject['Credentials']
+
+                for region in regions:
+                    ssm = boto3.client('ssm', region_name=region, aws_access_key_id = credentials['AccessKeyId'],
+                        aws_secret_access_key = credentials['SecretAccessKey'],
+                        aws_session_token = credentials['SessionToken'],)
+                    ec2 = boto3.client('ec2', region_name=region, aws_access_key_id = credentials['AccessKeyId'],
+                        aws_secret_access_key = credentials['SecretAccessKey'],
+                        aws_session_token = credentials['SessionToken'],)
+
+                    # get the list of currently running instances under the region using specific tags
+                    try:
+                        ec2_response = ec2.describe_instances(
+                            Filters=[
+                                {
+                                    'Name': tags_key,
+                                    'Values': tags_value,
+                                },
+                                ],
+                            MaxResults=50
+                            )
+                        ec2_instances = ec2_response
+                        while "NextToken" in ec2_instances:
+                            ec2_response = ec2.describe_instances(MaxResults=50,NextToken=response["NextToken"], Filters=[
+                                {
+                                    'Name': tags_key,
+                                    'Values': tags_value,
+                                },
+                                ],)
+                            ec2_instances.extend(ec2_response)
+                        ec2_instances_status = {instance['Instances'][0]["InstanceId"] : instance['Instances'][0]['State']['Name'] for instance in ec2_instances['Reservations']}
+                        #ec2_instances = list(ec2_instances_status.keys())
+                    except ClientError as error:
+                        raise error
+                    # get the SSM agent ping status of all instances that are registered in Systems Manager filter using tags
+                    # for managed instances that are not in Online state, set their PingStatus value to 1 (True), else set to 0 (False)
+                    # for other ec2 instances not reporting to systems manager set their status as 'Missing' and PingStatus value to 1 (True)
+                    try:
+                        response = ssm.describe_instance_information(
+                            Filters=[
+                                {
+                                        'Key': tags_key,
+                                        'Values': tags_value,
+                                    },
+                                ],
+                            MaxResults=50
+                        )
+                        managed_nodes = response['InstanceInformationList']
+                        while "NextToken" in response:
+                            response = ssm.describe_instance_information(MaxResults=50,NextToken=response["NextToken"],Filters=[
+                                    {
+                                        'Key': tags_key,
+                                        'Values': tags_value,
+                                    },
+                                ],)
+                            managed_nodes.extend(response['InstanceInformationList'])
+
+                        # add ec2 instances that are not terminated and add hybrid nodes too that have the tags
+                        for instance in managed_nodes:
+                            region_mapper.update({instance['InstanceId'] : region})
+                            if instance['InstanceId'] in ec2_instances_status:
+                                if ec2_instances_status[instance['InstanceId']] != "terminated":
+                                    status.update({(instance['InstanceId'],account) : instance['PingStatus']})
+                            else:
+                                status.update({(instance['InstanceId'],account) : instance['PingStatus']})
+                                
+                        # if ec2 instance is not included in the describe_instance_information() response, and is not terminated add it as "Missing"
+                        for node in ec2_instances_status:
+                            region_mapper.update({node: region})
+                            if (node,account) not in status:
+                                if ec2_instances_status[node] != "terminated":
+                                    status.update({(node,account): 'Missing'})
+                    except ClientError as error:
+                        raise error
+            print(f"final status list {status}")
+            if len(status) == 0:
+                print(f"No managed nodes with the specified tags {tags} found.")
+            return
+
+          # create custom metric PingStatus for tagged managed nodes in Clouwatch Metrics
+          def publish_cloudwatch_metric(status,cw):
+            for instance in status:
+                print("Creating/publishing PingStatus CloudWatch metric for " + instance[0])
+                try:
+                    value = 0 if status[instance] == 'Online' else 1
+                    cw.put_metric_data(
+                        Namespace='PingStatus',
+                        MetricData=[{
+                                'MetricName': 'PingStatus',
+                                'Dimensions': [
+                                    {  'Name': 'InstanceId', 'Value': instance[0]},
+                                    {  'Name': 'Region', 'Value': region_mapper.get(instance[0])},
+                                    ],
+                                'Value': value,
+                                'Unit': 'Count'
+                                        }]
+                                )
+                    logger.info("Put data for metric PingStatus managed node",  instance)
+                except ClientError as error:
+                    logger.exception("Couldn't put data for PingStatusmanaged node", instance)
+                    raise error
+            return
+
+          # create cloudWatch alarms for tagged managed nodes based on the PingStatus metrics and configure SNS alerts. If an instance has been terminated, or no longer have the tags filtered for PingStatus monitoring, delete the cloudWatch alarm
+          def create_alarm(sns_topic_arn,status,cw):
+            try:
+                response = cw.describe_alarms(AlarmNamePrefix="SSMAgent_PingStatus-")["MetricAlarms"]
+                alarms = dict((alarm["AlarmName"],1) for alarm in response)
+                alarms_for_instances_monitored = dict(('SSMAgent_PingStatus-'+instance+"-"+region_mapper.get(instance)+"-"+account,1) for instance,account in status) # generate new list of alarms to be created from instances monitored
+                for alarm_name in alarms:
+                    if alarm_name not in alarms_for_instances_monitored:
+                        print(f"Deleting CloudWatch Alarm for {alarm_name}")
+                        cw.delete_alarms(AlarmNames=[alarm_name,])
+                for instance,account in status:
+                    alarm_name = 'SSMAgent_PingStatus-'+instance+"-"+region_mapper.get(instance)+"-"+account
+                    if alarm_name not in alarms:
+                        print("Creating CloudWatch alarm for instance " + instance)
+                        cw.put_metric_alarm(
+                            AlarmName=alarm_name,
+                            ComparisonOperator='GreaterThanThreshold',
+                            EvaluationPeriods=1,
+                            DatapointsToAlarm=1,
+                            MetricName='PingStatus',
+                            Namespace='PingStatus',
+                            Period=300,
+                            Statistic='Average',
+                            Threshold=0,
+                            ActionsEnabled=True,
+                            AlarmActions=[sns_topic_arn] if sns_topic_arn else [],
+                            Tags=[
+                                {
+                                    'Key': 'CreatedBy',
+                                    'Value': 'PingStatusLambda'
+                                },
+                            ],
+                            AlarmDescription='Alarm and send alert when PingStatus binary value switches to 1',
+                            Dimensions=[
+                                    {
+                                    'Name': 'InstanceId',
+                                    'Value': instance
+                                    },
+                                    {  'Name': 'Region', 
+                                    'Value': region_mapper.get(instance)
+                                    }
+                                ],
+                            TreatMissingData='missing'
+                            )
+            except ClientError as error:
+                raise error
+            return
+
+          # create custom dashboard
+          def create_custom_dashboard(status, cw, cw_central_dashboard):
+            dashboard_name = "AWSOrganization-SSMAgentPingStatus"
+            widgets_list = [{
+                            "type": "text",
+                            "x": 0,
+                            "y": 0,
+                            "width": 24,
+                            "height": 6,
+                            "properties": {
+                                "markdown": "\n# AWSOrganization-SSMAgentPingStatus \n\n\n This dashboard was generated by the SSMAgent-PingStatus-LambdaFunction Lambda Function to monitor PingStatus of SSM agents on managed ec2 instances with specific tags in regions you define, and report their PingStatus metric to a central CloudWatch dashboard periodically. \n\n If `Online`, the metric is value `0`, otherwise it's value is `1`. The script also creates an alarm for the PingStatus metric and sends alert to an SNS topic you define when the Managed node is not `Online`.\n\n"
+                            }
+                        }]
+            # develop Dashboard widgets list for the managed nodes that are monitored
+            for instance,account in status:
+                title = f"({region_mapper.get(instance)})-{instance}_{account}_PingStatus"
+                # Define the widget for the binary metric
+                widgets_list.append({
+                    "type": "metric",
+                    "width": 12,
+                    "height": 6,
+                    "properties": {
+                        "metrics": [
+                            ["PingStatus", "PingStatus", 'InstanceId',instance, 'Region',region_mapper.get(instance), { "color": "#d62728", "yAxis": "left" }]
+                        ],
+                        "view": "timeSeries",
+                        "region": cw_central_dashboard,
+                        "end": "P0D",
+                        "stat": "Maximum",
+                        "period": 300,
+                        "title": title,
+                    },
+                    "legend": {
+                        "position": "bottom"
+                    },
+                    "yAxis": {
+                        "left": {
+                        "label": "PingStatus Binary Value",
+                        "showUnits": False
+                                }
+                            }
+                    })
+            dashboard = {
+                "widgets": widgets_list
+                }
+
+            # Create the custom dashboard if it doesn't exist before
+            try:
+                print(f"Creating creating/updating custom dashboard {dashboard_name}")
+                response = cw.put_dashboard(
+                        DashboardName=dashboard_name,
+                        DashboardBody=json.dumps(dashboard)
+                    )
+            except ClientError as error:
+                logger.exception("Couldn't create or update dashboard ", dashboard_name)
+                raise error
+            return
+      Role: !GetAtt AWSLambdaSSMPingStatusRole.Arn
+      Handler: index.lambda_handler
+      Runtime: python3.11
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref LambdaFunctionLogGroup
+      Environment:
+        Variables:
+          Target: !Ref Target
+          TargetAccounts: !Ref TargetAccounts
+          TargetRegionIds: !Ref TargetRegionIds
+          Tag: !Ref Tag
+          CrossAccountExecutionRoleName: !Ref CrossAccountExecutionRoleName
+          CloudwatchCentralDashboardRegion: !Ref CloudwatchCentralDashboardRegion
+          SNSTopicArn: !Ref SNSTopicArn
+          CreateCloudWatchAlarm: !Ref CreateCloudWatchAlarm
+          RetainCloudWatchResourcesOnDelete: !Ref RetainCloudWatchResourcesOnDelete
+# Custom resource to trigger the Lambda function at deployment time
+  TriggerSSMPingStatusInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: '1.0'
+    Properties:
+      ServiceToken: !GetAtt SSMPingStatusLambdaFunction.Arn
+Outputs:
+  EventBridgeRule:
+    Description: Amazon EventBridge rule
+    Value: !Ref EventBridgeRule
+  AWSLambdaSSMPingStatusRoleName:
+    Description: AWS Lambda PingStatus Role
+    Value: !Ref AWSLambdaSSMPingStatusRole
+  SSMPingStatusLambdaFunctionName:
+    Description: PingStatus Lambda Function
+    Value: !Ref SSMPingStatusLambdaFunction
