@@ -1,6 +1,6 @@
 ---
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS CloudFormation template for monitoring of  AWS Systems Manager Agent (SSM Agent) status on critical managed nodes across AWS Organizations. This template creates the cross account Identity Access Management (IAM) role for Lambda execution.
+Description: AWS CloudFormation template for monitoring of  AWS Systems Manager Agent (SSM Agent) status on critical managed nodes across AWS Organizations. This template creates the cross account Identity Access Management (IAM) role for AWS Lambda execution.
 Parameters:
   CentralAccount:
     Type: String
