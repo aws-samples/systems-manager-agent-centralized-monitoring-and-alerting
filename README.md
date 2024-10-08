@@ -1,5 +1,5 @@
 ## Centralized monitoring and alerting for AWS Systems Manager Agent status on managed nodes across AWS Organization
-This repo hosts templates written for the AWS Blog Post "Centralized monitoring and alerting for AWS Systems Manager Agent status on managed nodes across AWS Organization" published on the [AWS Cloud Operations & Migrations blog](https://aws.amazon.com/blogs/mt/) channel.
+This repo hosts templates written for the AWS Blog Post "[Centralized monitoring and alerting for AWS Systems Manager Agent status on managed nodes across AWS Organization](https://aws-blogs-prod.amazon.com/mt/centralized-monitoring-and-alerting-for-aws-systems-manager-agent-status-on-managed-nodes-across-aws-organization/)" published on the [AWS Cloud Operations & Migrations blog](https://aws.amazon.com/blogs/mt/) channel.
 
 ## Overview
 This post demonstrates how to monitor the status of the AWS Systems Manager Agent (SSM Agent) running on your critical managed nodes in your AWS Organization from a centralized Amazon Cloudwatch Dashboard and also configure Amazon Cloudwatch Alarms to send messages to an Amazon Simple Notification Service (SNS) topic that you define, whenever the SSM agent loses healthy connection to AWS Systems Manager. You can subscribe your email or mobile phone number to the SNS topic so that you can receive the alerts whenever the Amazon Cloudwatch Alarm is activated. The monitored critical managed nodes—which can be Amazon EC2 instances or on-premises nodes—are filtered out from the rest using specific tags that you have applied to these resources e.g. `env:prod` or `SSMMonitoring:true`.
@@ -38,7 +38,7 @@ There are two CloudFormation templates you will deploy for this solution:
 1.	Create an IAM role using [CloudFormation template](SSMAgent_IAM_Role.yml) in all your accounts in AWS Organization or specific AWS accounts. These IAM roles will be assumed by the SSMPingStatus Lambda Function to be created in next step. 
 2.	Deploy the SSMPingStatus Monitoring solution by launching a CloudFormation stack in your desired central dashboard region and account using the provided [CloudFormation template](SSMAgent_status.yml). This CloudFormation Template will create the required components – AWS Lambda Function, CloudWatch Alarms (optional), Amazon EventBridge Rule, and AWS CloudWatch Dashboard. 
 
-For the detailed instructions of deploying above steps, please follow the Walkthrough section of the blog.
+For the detailed instructions of deploying above steps, please follow the Walkthrough section of the [blog](https://aws-blogs-prod.amazon.com/mt/centralized-monitoring-and-alerting-for-aws-systems-manager-agent-status-on-managed-nodes-across-aws-organization/).
 
 ## Security
 
